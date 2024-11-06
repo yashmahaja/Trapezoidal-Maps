@@ -28,35 +28,67 @@ class Trapezoid:
 
 class Solution:
     def __init__(self):
-        # self.dag = DAG()  # DAG to represent the trapezoidal map
-        self.trapezoids = []  # Store trapezoids for the decomposition
+        self.dag = []
+        self.trapezoids = []
+        self.points = {}
+        self.segments = {}
+        self.coordinates = {}
+        self.min_x = float("inf")
+        self.max_x = float("-inf")
+        self.min_y = float("inf")
+        self.max_y = float("-inf")
 
     def get_input(self, filename):
-        segments = []
         with open(filename, 'r') as f:
-            n = int(f.readline().strip())
-            for _ in range(n):
-                x1, y1, x2, y2 = map(float, f.readline().strip().split())
-                segment = (Node(x1,y1), Node(x2,y2))
-                segments.append(segment)
-        print(segments)
-        self.bounding_box(segments)
-        return segments
+            f.readline()
+            i = 0
+            while True:
+                line = f.readline().strip()
+                if not line:
+                    break
+                x1, y1, x2, y2 = map(float, line.split())
+                left_label = f"P{i + 1}"
+                right_label = f"Q{i + 1}"
+                left_label = self.process_point(x1, y1, left_label)
+                right_label = self.process_point(x2, y2, right_label)
+                self.segments[f"S{i + 1}"] = (left_label, right_label)
+                i += 1
 
-    def bounding_box(self,segments):
-        min_x = min(segments[0][0].x, segments[0][1].x)
-        max_x = max(segments[0][0].x, segments[0][1].x)
-        min_y = min(segments[0][0].y, segments[0][1].y)
-        max_y = max(segments[0][0].y, segments[0][1].y)
-
-        for segment in segments:
-            for node in segment:
-                min_x = min(min_x, node.x)
-                max_x = max(max_x, node.x)
-                min_y = min(min_y, node.y)
-                max_y = max(max_y, node.y)
-        bounding_trapezoid = Trapezoid(top=max_y + 5, bottom=min_y - 5, left=min_x - 5 , right=max_x + 5)
+        bounding_trapezoid = self.create_bounding_box()
         print("Bounding box:", bounding_trapezoid)
+        print("Points:", self.points)
+        print("Segments:", self.segments)
+
+    def process_point(self, x, y, label):
+        if (x, y) in self.coordinates:
+            # Duplicate point, reuse existing label
+            existing_label = self.coordinates[(x, y)]
+            return existing_label
+        else:
+            # Unique point, update bounds and store it
+            self.update_bounds(x, y)
+            new_point = Node(x, y)
+            new_point.label = label
+            self.points[label] = new_point
+            self.coordinates[(x, y)] = label
+            return label
+
+    def update_bounds(self, x, y):
+        self.min_x = min(self.min_x, x)
+        self.max_x = max(self.max_x, x)
+        self.min_y = min(self.min_y, y)
+        self.max_y = max(self.max_y, y)
+
+    def create_bounding_box(self):
+        bounding_trapezoid = Trapezoid(
+            top=self.max_y + 5,
+            bottom=self.min_y - 5,
+            left=self.min_x - 5,
+            right=self.max_x + 5
+        )
+        bounding_trapezoid.label = "T1"
+        self.trapezoids.append(bounding_trapezoid.label)
+        self.dag.append(bounding_trapezoid.left)
         return bounding_trapezoid
 
     def build_trapezoidal_map(self, segments):
@@ -71,8 +103,9 @@ class Solution:
 def main():
     solution = Solution()
 
-    segments = solution.get_input("InputFiles/ya2390.txt")  # Replace with the actual input file name
+    segments = solution.get_input("InputFiles/ya2390.txt")
     solution.build_trapezoidal_map(segments)
+
 
 
 if __name__ == '__main__':
