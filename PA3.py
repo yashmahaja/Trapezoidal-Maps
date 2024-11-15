@@ -1,502 +1,658 @@
+"""
+Authors: Yash Mahajan, Yash Awaghate
+This script implements a trapezoidal map for point location queries using a randomized incremental construction algorithm.
+"""
 import matplotlib.pyplot as plt
-from matplotlib.patches import Polygon
+import pandas as pd
+import collections
 
-class Node:
-    def __init__(self, x=None, y=None, type=None, name=None, trapezoid=None, segment=None):
-        self.x = x
-        self.y = y
-        self.type = type
-        self.name = name
-        self.trapezoid = trapezoid
-        self.segment = segment  # For y-nodes
-        self.children = []  # Links to child nodes in the DAG
 
-    def add_child(self, child_node):
-        self.children.append(child_node)
-
-    def __repr__(self):
-        return f"Node(type={self.type}, name={self.name})"
-
+root_node = None
 
 class Trapezoid:
-    def __init__(self, top_left, bottom_left, top_right, bottom_right,
-                 label=None):
-        # Corner points of the trapezoid
-        self.top_left = top_left
-        self.bottom_left = bottom_left
-        self.top_right = top_right
-        self.bottom_right = bottom_right
+    _counter = 0  # Class-level attribute for tracking the next available ID
 
-        # Equations representing the boundaries of the trapezoid
-        self.top_equation = None  # Equation for the top boundary
-        self.bottom_equation = None  # Equation for the bottom boundary
-        self.left_equation = None  # Equation for the left boundary
-        self.right_equation = None  # Equation for the right boundary
-        # Dictionary to store neighboring trapezoids if needed
-        self.neighbors = {}
+    def __init__(self, top, bottom, left_point, right_point):
+        self.top = top
+        self.bottom = bottom
+        self.leftp = left_point
+        self.rightp = right_point
+        self.trapezoid_id = self._generate_id()
+        self.identifier = f"T{self.trapezoid_id}"  # Assigning a unique identifier
 
-        # Label to identify the trapezoid
-        self.label = label
+        self.neighbors = self._initialize_neighbors()
+
+    @classmethod
+    def _generate_id(cls):
+        """
+        Generates a unique ID for each trapezoid instance.
+        """
+        current_id = cls._counter
+        cls._counter += 1  # Incrementing the counter for the next trapezoid
+        return current_id
+
+    def _initialize_neighbors(self):
+        """
+        Initializes the neighbors dictionary with default None values.
+        """
+        return {
+            'top_left': None,
+            'bottom_left': None,
+            'top_right': None,
+            'bottom_right': None
+        }
+
+    def set_neighbor(self, position, neighbor):
+        """
+        Sets a neighbor for the trapezoid at the specified position.
+
+        :param position: One of 'top_left', 'bottom_left', 'top_right', 'bottom_right'.
+        :param neighbor: The neighboring trapezoid to set.
+        """
+        if position in self.neighbors:
+            self.neighbors[position] = neighbor
+        else:
+            raise ValueError(f"Invalid neighbor position: {position}")
+
+    def get_neighbor(self, position):
+        """
+        Retrieves the neighbor at the specified position.
+
+        :param position: One of 'top_left', 'bottom_left', 'top_right', 'bottom_right'.
+        :return: The neighboring trapezoid at the specified position.
+        """
+        return self.neighbors.get(position)
 
     def __repr__(self):
-        return (
-            f"Trapezoid(label={self.label}, "
-            f"top_left={self.top_left}, bottom_left={self.bottom_left}, "
-            f"top_right={self.top_right}, bottom_right={self.bottom_right}, "
-            f"neighbors={list(self.neighbors.keys())})"
-        )
+        return (f"Trapezoid(top={self.top}, bottom={self.bottom}, leftp={self.leftp}, "
+                f"rightp={self.rightp}, trapezoid_id={self.trapezoid_id}, "
+                f"identifier='{self.identifier}', neighbors={self.neighbors})")
+
+# these dictionaries are displayed at the end for debugging and to get a clear idea
+# of the data structures to manage the relationships between nodes
+
+class Point:
+    def __init__(self, x, y, is_left=True):
+        self.x = x
+        self.y = y
+        self.identifier = self._assign_identifier(is_left)
 
 
-class Solution:
+    _left_counter = 0
+    _right_counter = 0
+    @classmethod
+    def _assign_identifier(cls, is_left):
+        identifier = f"{'P' if is_left else 'Q'}{cls._left_counter if is_left else cls._right_counter}";
+        cls._left_counter += is_left; cls._right_counter += not is_left; return identifier
+
+
+    def __repr__(self):
+        return f"Point(x={self.x}, y={self.y}, id='{self.identifier}')"
+
+    def __eq__(self, other):
+        return isinstance(other, Point) and self.x == other.x and self.y == other.y
+
+    def __hash__(self):
+        return hash((self.x, self.y))
+
+
+class Segment:
+    _counter = 1
+
+    def __init__(self, left_point, right_point):
+        self.left = left_point
+        self.right = right_point
+        self.identifier = self._assign_identifier()
+        self._validate_points()
+
+    @classmethod
+    def _assign_identifier(cls):
+        identifier = f"S{cls._counter}"
+        cls._counter += 1
+        return identifier
+
+    def _validate_points(self):
+        if self.left.x > self.right.x:
+            raise ValueError("Left point must have a smaller x-coordinate than the right point.")
+
+    def __repr__(self):
+        return f"Segment(left={self.left}, right={self.right}, id='{self.identifier}')"
+
+    def get_slope(self):
+        dx = self.right.x - self.left.x
+        if dx == 0:
+            return float('inf')
+        return (self.right.y - self.left.y) / dx
+
+    def get_y_at(self, x):
+        slope = self.get_slope()
+        return self.left.y + slope * (x - self.left.x)
+
+
+def display_dictionaries():
+    dictionaries = {'A (Left Node)': A, 'B (Right Node)': B, 'C (Segment)': C, 'D (Trapezoid)': D}
+    for name, dictionary in dictionaries.items():
+        print(f"\n{name}:")
+        for key, value in dictionary.items():
+            print(f"  {key}: {value}")
+
+
+
+class Node:
     def __init__(self):
-        self.dag = None
-        self.trapezoids = {}  # Changed to dictionary
-        self.points = {}
-        self.segments = {}
-        self.coordinates = {}
-        self.points_to_label = {}
-        self.min_x = float("inf")
-        self.max_x = float("-inf")
-        self.min_y = float("inf")
-        self.max_y = float("-inf")
-
-    def get_input(self, filename):
-        with open(filename, 'r') as f:
-            f.readline()
-            i = 0
-            while True:
-                line = f.readline().strip()
-                if not line:
-                    break
-                x1, y1, x2, y2 = map(float, line.split())
-                left_label = f"P{i + 1}"
-                right_label = f"Q{i + 1}"
-                left_label = self.process_point(x1, y1, left_label)
-                right_label = self.process_point(x2, y2, right_label)
-                self.segments[f"S{i + 1}"] = (left_label, right_label)
-                i += 1
-
-        bounding_trapezoid = self.create_bounding_box()
-        print("Bounding box:", bounding_trapezoid)
-        print("Points:", self.points)
-        print("Segments:", self.segments)
-
-    def process_point(self, x, y, label):
-        if (x, y) in self.coordinates:
-            # Duplicate point, reuse existing label
-            existing_label = self.coordinates[(x, y)]
-            return existing_label
-        else:
-            # Unique point, update bounds and store it
-            self.update_bounds(x, y)
-            new_point = Node(x, y)
-            self.points[label] = new_point
-            self.points_to_label[new_point] = label
-            self.coordinates[(x, y)] = label
-            return label
-
-    def update_bounds(self, x, y):
-        self.min_x = min(self.min_x, x)
-        self.max_x = max(self.max_x, x)
-        self.min_y = min(self.min_y, y)
-        self.max_y = max(self.max_y, y)
-
-    def create_bounding_box(self):
-        bounding_trapezoid = Trapezoid(
-            top_left=Node(self.min_x - 5, self.max_y + 5),
-            bottom_left=Node(self.min_x - 5, self.min_y - 5),
-            top_right=Node(self.max_x + 5, self.max_y + 5),
-            bottom_right=Node(self.max_x + 5, self.min_y - 5),
-            label="T1"
-        )
-
-        self.assign_line_segments(bounding_trapezoid)
-        self.trapezoids[bounding_trapezoid.label] = bounding_trapezoid  # Add to dictionary
-        self.dag = Node(type='Trapezoid', name='T1', trapezoid=bounding_trapezoid)
-        return bounding_trapezoid
-
-    def assign_line_segments(self, trapezoid):
-        # Helper function to calculate line equation (A, B, C) from two points
-        def line_from_points(p1, p2):
-            A = p2.y - p1.y
-            B = p1.x - p2.x
-            C = A * p1.x + B * p1.y
-            return (A, B, C)
-
-        # Calculate and assign line equations based on trapezoid corners
-        trapezoid.top_equation = line_from_points(trapezoid.top_left,
-                                                  trapezoid.top_right)
-        trapezoid.bottom_equation = line_from_points(trapezoid.bottom_left,
-                                                     trapezoid.bottom_right)
-        trapezoid.left_equation = line_from_points(trapezoid.top_left,
-                                                   trapezoid.bottom_left)
-        trapezoid.right_equation = line_from_points(trapezoid.top_right,
-                                                    trapezoid.bottom_right)
-
-        # Optionally, print the equations for verification
-        print(f"Assigned line equations for trapezoid {trapezoid.label}:")
-        print(f"  Top equation: {trapezoid.top_equation}")
-        print(f"  Bottom equation: {trapezoid.bottom_equation}")
-        print(f"  Left equation: {trapezoid.left_equation}")
-        print(f"  Right equation: {trapezoid.right_equation}")
-
-    def check_intersections(self, line_segment):
-        intersecting_trapezoids = []
-        intersection_points = []
-        for trapezoid in self.trapezoids.values():  # Adjusted for dictionary
-            for boundary_equation in [
-                trapezoid.top_equation,
-                trapezoid.bottom_equation,
-                trapezoid.left_equation,
-                trapezoid.right_equation
-            ]:
-                if self.do_intersect(line_segment, boundary_equation):
-                    intersecting_trapezoids.append(trapezoid)
-                    intersection_points.append(
-                        self.find_intersection_point(line_segment,
-                                                     boundary_equation))
-        return intersecting_trapezoids, intersection_points
-
-    def do_intersect(self, segment_labels, boundary_equation):
-        # segment_labels is in the form (label1, label2), e.g., ("P1", "Q1")
-        # boundary_equation is in the form (A, B, C)
-
-        # Unpack the segment labels
-        label1, label2 = segment_labels
-
-        # Fetch the actual points for label1 and label2 from the points dictionary
-        p1 = self.points[label1]
-        q1 = self.points[label2]
-
-        # Unpack the boundary line equation coefficients
-        A, B, C = boundary_equation
-
-        # Calculate the "position" of points p1 and q1 relative to the boundary line
-        # Substitute p1 and q1 into the line equation Ax + By = C to check on which side they lie
-        pos1 = A * p1.x + B * p1.y - C
-        pos2 = A * q1.x + B * q1.y - C
-
-        # If pos1 and pos2 have opposite signs, then the segment intersects the line
-        if pos1 * pos2 < 0:
-            return True
-
-        # Special case: if either pos1 or pos2 is exactly zero, it lies on the boundary line
-        if pos1 == 0 or pos2 == 0:
-            return True
-
-        return False
-
-    def on_segment(self, p, q, r):
-        if (q.x <= max(p.x, r.x) and q.x >= min(p.x, r.x) and
-                q.y <= max(p.y, r.y) and q.y >= min(p.y, r.y)):
-            return True
-        return False
-
-    def find_intersection_point(self, segment1, segment2):
-        # Helper function to find the intersection point of two line segments
-        p1, q1 = segment1
-        p2, q2 = segment2
-
-        A1 = q1.y - p1.y
-        B1 = p1.x - q1.x
-        C1 = A1 * p1.x + B1 * p1.y
-
-        A2 = q2.y - p2.y
-        B2 = p2.x - q2.x
-        C2 = A2 * p2.x + B2 * p2.y
-
-        determinant = A1 * B2 - A2 * B1
-
-        if determinant == 0:
-            return None  # The lines are parallel (should not happen in general case)
-
-        x = (B2 * C1 - B1 * C2) / determinant
-        y = (A1 * C2 - A2 * C1) / determinant
-
-        return Node(x, y)
-
-    def insert_segments(self, selected):
-        # Retrieve segment endpoints
-        left_point = self.points[selected[0]]  # Start point P1
-        right_point = self.points[selected[1]]  # End point Q1
-
-        # Ensure left_point.x <= right_point.x
-        if left_point.x > right_point.x:
-            left_point, right_point = right_point, left_point
-
-        print("Processing segment between", left_point, "and", right_point)
-
-        # Find trapezoids containing the segment endpoints
-        result1, parent1 = self.where_is_my_point((left_point.x, left_point.y))
-        result2, parent2 = self.where_is_my_point((right_point.x, right_point.y))
-
-        # Since both points lie in the same trapezoid
-        if result1 == result2:
-            print("Both points lie within the same trapezoid.")
-
-            old_trapezoid = result1.trapezoid  # Get the actual trapezoid object
-
-            x1 = left_point.x
-            x2 = right_point.x
-
-            # Compute intersection points with the top boundary
-            if old_trapezoid.top_right.x != old_trapezoid.top_left.x:
-                m_top = (old_trapezoid.top_right.y - old_trapezoid.top_left.y) / (
-                    old_trapezoid.top_right.x - old_trapezoid.top_left.x)
-                y1_top = old_trapezoid.top_left.y + m_top * (x1 - old_trapezoid.top_left.x)
-                y2_top = old_trapezoid.top_left.y + m_top * (x2 - old_trapezoid.top_left.x)
-            else:
-                y1_top = old_trapezoid.top_left.y
-                y2_top = old_trapezoid.top_left.y
-
-            # Compute intersection points with the bottom boundary
-            if old_trapezoid.bottom_right.x != old_trapezoid.bottom_left.x:
-                m_bottom = (old_trapezoid.bottom_right.y - old_trapezoid.bottom_left.y) / (
-                    old_trapezoid.bottom_right.x - old_trapezoid.bottom_left.x)
-                y1_bottom = old_trapezoid.bottom_left.y + m_bottom * (x1 - old_trapezoid.bottom_left.x)
-                y2_bottom = old_trapezoid.bottom_left.y + m_bottom * (x2 - old_trapezoid.bottom_left.x)
-            else:
-                y1_bottom = old_trapezoid.bottom_left.y
-                y2_bottom = old_trapezoid.bottom_left.y
-
-            # Create the four new trapezoids
-            # Trapezoid T1 (Left of the segment)
-            T1 = Trapezoid(
-                top_left=old_trapezoid.top_left,
-                top_right=Node(x1, y1_top),
-                bottom_left=old_trapezoid.bottom_left,
-                bottom_right=Node(x1, y1_bottom),
-                label='T1'
-            )
-            self.assign_line_segments(T1)
-
-            # Trapezoid T4 (Right of the segment)
-            T4 = Trapezoid(
-                top_left=Node(x2, y2_top),
-                top_right=old_trapezoid.top_right,
-                bottom_left=Node(x2, y2_bottom),
-                bottom_right=old_trapezoid.bottom_right,
-                label='T4'
-            )
-            self.assign_line_segments(T4)
-
-            # Trapezoid T2 (Above the segment between the vertical lines)
-            T2 = Trapezoid(
-                top_left=T1.top_right,
-                top_right=T4.top_left,
-                bottom_left=left_point,
-                bottom_right=right_point,
-                label='T2'
-            )
-            self.assign_line_segments(T2)
-
-            # Trapezoid T3 (Below the segment between the vertical lines)
-            T3 = Trapezoid(
-                top_left=left_point,
-                top_right=right_point,
-                bottom_left=T1.bottom_right,
-                bottom_right=T4.bottom_left,
-                label='T3'
-            )
-            self.assign_line_segments(T3)
-
-            # Update the DAG
-            # Create nodes for the trapezoids
-            T1_node = Node(type='Trapezoid', name='T1', trapezoid=T1)
-            T2_node = Node(type='Trapezoid', name='T2', trapezoid=T2)
-            T3_node = Node(type='Trapezoid', name='T3', trapezoid=T3)
-            T4_node = Node(type='Trapezoid', name='T4', trapezoid=T4)
-
-            # Create nodes for x and y tests
-            x_node_left = Node(x=x1, type='xnode', name=f'x={x1}')
-            x_node_right = Node(x=x2, type='xnode', name=f'x={x2}')
-            y_node = Node(type='ynode', name='Segment', segment=(left_point, right_point))
-
-            # Build the new DAG structure
-            x_node_left.children = [T1_node, x_node_right]
-            x_node_right.children = [y_node, T4_node]
-            y_node.children = [T2_node, T3_node]  # [Above, Below]
-
-            # Replace the old trapezoid node in the DAG
-            if parent1:
-                for i, child in enumerate(parent1.children):
-                    if child == result1:
-                        parent1.children[i] = x_node_left
-                        break
-            else:
-                # If the old trapezoid was the root
-                self.dag = x_node_left
-
-            # Update the trapezoids dictionary
-            del self.trapezoids[old_trapezoid.label]  # Remove old trapezoid
-            self.trapezoids[T1.label] = T1
-            self.trapezoids[T2.label] = T2
-            self.trapezoids[T3.label] = T3
-            self.trapezoids[T4.label] = T4
-
-            print("Segment insertion complete.")
-
-        else:
-            print("Points do not lie within the same trapezoid.")
-
-    def get_trapezoids(self):
-        pass
-
-    def x_test(self, node, x_value):
-        # return True if x_value > node.x (go to right child), else False
-        return x_value > node.x
-
-    def y_test(self, node, point):
-        left_point = node.segment[0]
-        right_point = node.segment[1]
-
-        if right_point.x != left_point.x:
-            slope = (right_point.y - left_point.y) / (right_point.x - left_point.x)
-            intercept = left_point.y - slope * left_point.x
-        else:
-            return point[1] > left_point.y  # For vertical lines
-
-        y_on_line = slope * point[0] + intercept
-
-        return point[1] > y_on_line  # True if point is above the segment
-
-    def where_is_my_point(self, point):
-
-        # Traverse DAG.
-        node = self.dag
-        parent = None
-        while len(node.children) != 0:
-            if node.type == 'xnode':
-                result = self.x_test(node, point[0])
-                parent = node
-                if result:
-                    node = node.children[1]
-                else:
-                    node = node.children[0]
-            elif node.type == 'ynode':
-                result = self.y_test(node, point)
-                parent = node
-                if result:
-                    node = node.children[0]  # Above segment
-                else:
-                    node = node.children[1]  # Below segment
-            else:
-                # Trapezoid node
-                break
-
-        return node, parent
-
-    def build_trapezoidal_map(self):
-
-        # Randomly add a segment
-        selected = self.segments['S1']
-        print("Selected:", selected)
-
-        self.insert_segments(selected)
-        # Implements the incremental construction algorithm
-
-    def query_point(self, x, y):
-        # Uses the DAG to locate the trapezoidal region containing (x, y)
-        pass
-class TrapezoidalMapVisualizer:
-    def __init__(self, trapezoids, segments, points, min_x, max_x, min_y, max_y):
-        self.trapezoids = trapezoids
-        self.segments = segments
-        self.points = points
-        self.min_x = min_x
-        self.max_x = max_x
-        self.min_y = min_y
-        self.max_y = max_y
-
-    def plot(self):
-        fig, ax = plt.subplots()
-        # Plot trapezoids
-        for label, trapezoid in self.trapezoids.items():
-            # Get corner points
-            points = [
-                (trapezoid.top_left.x, trapezoid.top_left.y),
-                (trapezoid.top_right.x, trapezoid.top_right.y),
-                (trapezoid.bottom_right.x, trapezoid.bottom_right.y),
-                (trapezoid.bottom_left.x, trapezoid.bottom_left.y)
-            ]
-            # Create a polygon patch
-            polygon = Polygon(points, closed=True, fill=None, edgecolor='blue', linewidth=1)
-            ax.add_patch(polygon)
-            # Annotate the trapezoid label at its centroid
-            centroid_x = sum([p[0] for p in points]) / 4
-            centroid_y = sum([p[1] for p in points]) / 4
-            ax.text(centroid_x, centroid_y, label, color='blue', fontsize=8)
-
-            # Print trapezoid coordinates
-            print(f"Trapezoid {label} coordinates:")
-            for i, point in enumerate(points):
-                print(f"  Point {i+1}: ({point[0]}, {point[1]})")
-            print()
-
-        # Plot segments
-        for label, (start_label, end_label) in self.segments.items():
-            start_point = self.points[start_label]
-            end_point = self.points[end_label]
-            x_values = [start_point.x, end_point.x]
-            y_values = [start_point.y, end_point.y]
-            ax.plot(x_values, y_values, color='red', linewidth=2, label=f'Segment {label}')
-            # Print segment coordinates
-            print(f"Segment {label} from ({start_point.x}, {start_point.y}) to ({end_point.x}, {end_point.y})")
-
-        # Set plot limits
-        ax.set_xlim(self.min_x - 10, self.max_x + 10)
-        ax.set_ylim(self.min_y - 10, self.max_y + 10)
-
-        ax.set_aspect('equal', adjustable='box')
-        ax.set_title('Trapezoidal Map')
-        ax.set_xlabel('X-axis')
-        ax.set_ylabel('Y-axis')
-
-        # Remove duplicate labels in legend
-        handles, labels = ax.get_legend_handles_labels()
-        by_label = dict(zip(labels, handles))
-        ax.legend(by_label.values(), by_label.keys())
-
-        plt.show()
-
-def get_plotting_data(solution, inserted_segments):
-    # Filter segments to include only those in inserted_segments
-    segments = {k: v for k, v in solution.segments.items() if k in inserted_segments}
-    plotting_data = {
-        'trapezoids': solution.trapezoids,
-        'segments': segments,
-        'points': solution.points,
-        'min_x': solution.min_x,
-        'max_x': solution.max_x,
-        'min_y': solution.min_y,
-        'max_y': solution.max_y
+        self.parents = []
+
+    def add_parent(self, parent):
+        self.parents.append(parent)
+
+    def remove_parents(self):
+        self.parents = []
+
+
+class XNode(Node):
+    def __init__(self, x_value, point_represented, left=None, right=None):
+        super().__init__()
+        self.x_value = x_value
+        self.point_represented = point_represented
+        self.left = left
+        self.right = right
+
+    def __repr__(self):
+        return f"XNode(x_value={self.x_value}, point={self.point_represented})"
+
+
+class YNode(Node):
+    def __init__(self, segment, up=None, down=None):
+        super().__init__()
+        self.segment = segment
+        self.above = up
+        self.below = down
+
+    def __repr__(self):
+        return f"YNode(segment={self.segment})"
+
+
+class LeafNode(Node):
+    def __init__(self, trapezoid_id):
+        super().__init__()
+        self.trapezoid_id = trapezoid_id
+
+    def reconnect_parents_to_new_subtree(self, new_subtree_root):
+        for parent in self.parents:
+            if isinstance(parent, XNode):
+                setattr(parent, 'left' if parent.left == self else 'right', new_subtree_root)
+            elif isinstance(parent, YNode):
+                setattr(parent, 'above' if parent.above == self else 'below', new_subtree_root)
+            new_subtree_root.add_parent(parent)
+        self.remove_parents()  # Clear parent references
+
+
+    def __repr__(self):
+        return f"LeafNode(trapezoid_id={self.trapezoid_id})"
+
+# Four global dictionaries to aid in constructing the adjacency matrix:
+# Dictionary `A` maps left node identifiers to XNode instances, each associated with a unique Point object.
+A = B = C = D = collections.defaultdict(list)
+
+# Dictionary `B` maps right node identifiers to XNode instances, each linked to a single Point object.
+B = collections.defaultdict(list)
+
+# Dictionary `C` associates segment identifiers with YNode instances, each tied to a unique Segment object.
+C = collections.defaultdict(list)
+
+# Dictionary `D` maps trapezoid identifiers to LeafNode instances, each referencing a Trapezoid object through the mapping.
+D = collections.defaultdict(list)
+
+def process(filename):
+    segments, bounding_box = read_input_file(filename)
+    return segments, bounding_box
+
+def read_input_file(filename):
+    segments, bounding_box = [], []
+    try:
+        with open(filename, 'r') as file:
+            num_segments = int(file.readline().strip())
+            bounding_box = [int(x) for x in file.readline().split()]
+            segments = [[int(x) for x in file.readline().split()] for _ in range(num_segments)]
+    except FileNotFoundError:
+        print(f"Error: The file '{filename}' was not found.")
+    except ValueError as e:
+        print(f"Error while processing the file '{filename}': {e}")
+    return segments, bounding_box
+
+
+
+
+def add_totals(df):
+    df.loc['Total'] = df.iloc[:-1].sum()
+    df['Total'] = df.iloc[:, :-1].sum(axis=1)
+    return df
+
+def show_matrices():
+    data = {
+        'Column1': [1, 2, 3],
+        'Column2': [4, 5, 6],
+        'Column3': [7, 8, 9]
     }
-    return plotting_data
+
+    df = pd.DataFrame(data, columns=['Col1', 'Col2', 'Col3'], index=['R1', 'R2', 'R3'])
+    df = add_totals(df)
+    df.at['Row1', 'Column2'] = 500
+
+    df = add_totals(df)
+
+    print(df)
+
+
+
+
+
+
+def is_point_above_segment(point, segment):
+    if segment.left.x == segment.right.x:
+        return point.y > max(segment.left.y, segment.right.y)
+    return point.y > (segment.left.y + ((segment.right.y - segment.left.y) / (segment.right.x - segment.left.x)) * (point.x - segment.left.x))
+
+
+
+def query_point_lies_on_segment(point, segment):
+    x1, y1, x2, y2 = segment.left.x, segment.left.y, segment.right.x, segment.right.y
+    return (x2 - x1) * (point.y - y1) == (y2 - y1) * (point.x - x1) and min(x1, x2) <= point.x <= max(x1, x2) and min(y1, y2) <= point.y <= max(y1, y2)
+
+
+def compare_segment_slopes(segment1, segment2, point):
+    slope1 = (segment1.right.y - segment1.left.y) / (
+                segment1.right.x - segment1.left.x) if segment1.right.x != segment1.left.x else float('inf')
+    slope2 = (segment2.right.y - segment2.left.y) / (
+                segment2.right.x - segment2.left.x) if segment2.right.x != segment2.left.x else float('inf')
+
+    return slope1 > slope2
+
+
+def query(start_node, point, active_segment=None):
+    node = start_node
+    while not isinstance(node, LeafNode):
+        if isinstance(node, XNode):
+            node = node.right if point.x <= node.x_value else node.left
+        elif isinstance(node, YNode):
+            seg = node.segment
+            if query_point_lies_on_segment(point, seg):
+                node = node.above if compare_segment_slopes(active_segment, seg, point) else node.below
+            else:
+                node = node.above if is_point_above_segment(point, seg) else node.below
+
+    return node
+
+
+
+def find_intersected_trapezoids(segment, trapezoids):
+    global root_node
+    intersected_trapezoids = []
+
+    # Step 1: Identify endpoints
+    left_endpoint, right_endpoint = segment.left, segment.right
+
+    display_dictionaries()
+
+    # Step 2: Find the first trapezoid that contains the left endpoint
+    current_trapezoid_node = query(root_node, left_endpoint, segment)
+    print("Current leaf node is: ", current_trapezoid_node)
+
+    current_trapezoid = get_trapezoid_from_node(current_trapezoid_node, trapezoids)
+
+    # Step 3: Iteratively find neighboring trapezoids
+    while current_trapezoid and right_endpoint.x > current_trapezoid.rightp.x:
+        intersected_trapezoids.append(current_trapezoid.trapezoid_id)
+        current_trapezoid = move_to_next_trapezoid(current_trapezoid, segment)
+
+    # Add the last trapezoid if it exists
+    if current_trapezoid:
+        intersected_trapezoids.append(current_trapezoid.trapezoid_id)
+
+    return intersected_trapezoids
+
+def get_trapezoid_from_node(trapezoid_node, trapezoids):
+    trapezoid_id = trapezoid_node.trapezoid_id
+    # Assuming the third element is the Trapezoid object
+    trapezoid = trapezoids[trapezoid_id][2]
+    return trapezoid
+
+def move_to_next_trapezoid(current_trapezoid, segment):
+    if is_point_above_segment(current_trapezoid.rightp, segment):
+        # Move to lower right neighbor
+        next_trapezoid = current_trapezoid.neighbors['bottom_right']
+    else:
+        # Move to upper right neighbor
+        next_trapezoid = current_trapezoid.neighbors['top_right']
+    return next_trapezoid
+
+
+
+def update_neighbors(intersected_trapezoid, new_trapezoid):
+    """
+    Updates the neighbors of the new trapezoid based on the neighbors of the intersected trapezoid.
+    """
+    # Iterate over each neighbor of the intersected trapezoid
+    for side, neighbor in intersected_trapezoid.neighbors.items():
+        if neighbor is not None:
+            if side in ["top_left", "bottom_left"]:
+                # For left side neighbors
+                update_neighbor_side(new_trapezoid, neighbor, side, left_side=True)
+            else:
+                # For right side neighbors
+                update_neighbor_side(new_trapezoid, neighbor, side, left_side=False)
+
+
+def update_neighbor_side(new_trapezoid, neighbor, side, left_side):
+    """
+    Helper function to update the neighbor on a specific side (left or right).
+    """
+    if left_side:
+        top_key = "top_left"
+        bottom_key = "bottom_left"
+    else:
+        top_key = "top_right"
+        bottom_key = "bottom_right"
+
+    # Update top neighbor if applicable
+    if new_trapezoid.top == neighbor.top and new_trapezoid.neighbors.get(top_key) is None:
+        new_trapezoid.neighbors[top_key] = neighbor
+
+    # Update bottom neighbor if applicable
+    if new_trapezoid.bottom == neighbor.bottom and new_trapezoid.neighbors.get(bottom_key) is None:
+        new_trapezoid.neighbors[bottom_key] = neighbor
+
+
+# ****************************************************************************
+
+def update(trapezoids_intersected, trapezoids, left_point, right_point, segment):
+    global root_node
+
+    for trap_id in trapezoids_intersected:
+        if trap_id not in trapezoids:
+            continue
+
+        trap_identifier, trap_leaf, trapezoid = trapezoids[trap_id]
+
+        if left_point.x < trapezoid.leftp.x and trapezoid.rightp.x < right_point.x:
+            handle_case_segment_crosses_trapezoid(trapezoids, trapezoid, trap_leaf, segment)
+        elif left_point.x >= trapezoid.leftp.x and right_point.x <= trapezoid.rightp.x:
+            handle_case_segment_lies_inside_trapezoid(trapezoids, trapezoid, trap_leaf, segment, left_point,
+                                                      right_point)
+        else:
+            handle_case_one_point_inside_one_point_outside(trapezoids, trapezoid, trap_leaf, segment, left_point,
+                                                           right_point)
+
+
+def handle_case_segment_crosses_trapezoid(trapezoids, intersected_trapezoid, intersected_trapezoid_leaf, segment):
+    global D, C
+
+    # Create and link two new trapezoids
+    top_trap = create_trapezoid(intersected_trapezoid.top, None, intersected_trapezoid.leftp, intersected_trapezoid.rightp)
+    bottom_trap = create_trapezoid(None, intersected_trapezoid.bottom, intersected_trapezoid.leftp, intersected_trapezoid.rightp)
+    top_trap.bottom, bottom_trap.top = bottom_trap, top_trap
+
+    # Update neighbors and remove old trapezoid
+    update_neighbors(intersected_trapezoid, top_trap)
+    update_neighbors(intersected_trapezoid, bottom_trap)
+    remove_trapezoid(trapezoids, D, intersected_trapezoid)
+
+    # Create leaf nodes and a Y-node
+    top_leaf, bottom_leaf = create_leaf_node(top_trap), create_leaf_node(bottom_trap)
+    segment_node = YNode(segment, top_leaf, bottom_leaf)
+    C[segment.identifier].append(segment_node)
+
+    # Update parent pointers
+    top_leaf.parents.append(segment_node)
+    bottom_leaf.parents.append(segment_node)
+
+    # Add new trapezoids and update search structure
+    add_trapezoid(trapezoids, top_trap, top_leaf)
+    add_trapezoid(trapezoids, bottom_trap, bottom_leaf)
+    intersected_trapezoid_leaf.reconnect_parents_to_new_subtree(segment_node)
+
+
+def handle_case_segment_lies_inside_trapezoid(trapezoids, intersected_trapezoid, intersected_trapezoid_leaf, segment, left_point, right_point):
+    global D, C, A, B, root_node
+
+    # Create and link new trapezoids
+    U_trap = create_trapezoid(intersected_trapezoid.top, intersected_trapezoid.bottom, intersected_trapezoid.leftp, left_point)
+    Y_trap = create_trapezoid(intersected_trapezoid.top, None, left_point, right_point)
+    Z_trap = create_trapezoid(None, intersected_trapezoid.bottom, left_point, right_point)
+    X_trap = create_trapezoid(intersected_trapezoid.top, intersected_trapezoid.bottom, right_point, intersected_trapezoid.rightp)
+
+    # Link relationships
+    Y_trap.bottom, Z_trap.top = Z_trap, Y_trap
+
+    # Update neighbors and remove the old trapezoid
+    [update_neighbors(intersected_trapezoid, trap) for trap in [U_trap, X_trap]]
+    set_neighbors_case_segment_lies_inside(U_trap, Y_trap, Z_trap, X_trap)
+    remove_trapezoid(trapezoids, D, intersected_trapezoid)
+
+    # Create leaf nodes and connections
+    U_leaf, Y_leaf, Z_leaf, X_leaf = (create_leaf_node(trap) for trap in [U_trap, Y_trap, Z_trap, X_trap])
+    y_node = YNode(segment, Y_leaf, Z_leaf)
+    C[segment.identifier].append(y_node)
+
+    p_node = XNode(left_point.x, left_point, U_leaf, XNode(right_point.x, right_point, y_node, X_leaf))
+    A[left_point.identifier].append(p_node)
+    B[right_point.identifier].append(p_node.right)
+
+    # Set parent references
+    for leaf, parent in [(U_leaf, p_node), (Y_leaf, y_node), (Z_leaf, y_node), (X_leaf, p_node.right)]:
+        leaf.parents.append(parent)
+
+    # Add new trapezoids
+    [add_trapezoid(trapezoids, trap, leaf) for trap, leaf in [(U_trap, U_leaf), (Y_trap, Y_leaf), (Z_trap, Z_leaf), (X_trap, X_leaf)]]
+
+    # Reconnect and update root if necessary
+    intersected_trapezoid_leaf.reconnect_parents_to_new_subtree(p_node)
+    if isinstance(root_node, LeafNode):
+        root_node = p_node
+
+
+
+def handle_case_one_point_inside_one_point_outside(trapezoids, intersected_trapezoid, intersected_trapezoid_leaf,
+                                                   segment, left_point, right_point):
+    global D, C, A, B
+
+    # Create and link new trapezoids for splitting
+    traps = [
+        create_trapezoid(intersected_trapezoid.top, intersected_trapezoid.bottom, intersected_trapezoid.leftp,
+                         left_point),
+        create_trapezoid(intersected_trapezoid.top, None, left_point, right_point),
+        create_trapezoid(None, intersected_trapezoid.bottom, left_point, intersected_trapezoid.rightp)
+    ]
+    traps[1].bottom, traps[2].top = traps[2], traps[1]  # Link top and bottom
+
+    set_neighbors_case_one_point_inside(*traps)
+    [update_neighbors(intersected_trapezoid, trap) for trap in traps]
+    remove_trapezoid(trapezoids, D, intersected_trapezoid)
+
+    # Create nodes and update structure
+    leaves = [create_leaf_node(trap) for trap in traps]
+    segment_y_node = YNode(segment, leaves[1], leaves[2])
+    C[segment.identifier].append(segment_y_node)
+
+    subtree_root = XNode(left_point.x, left_point, leaves[0],
+                         segment_y_node) if left_point.x >= intersected_trapezoid.leftp.x else XNode(right_point.x,
+                                                                                                     right_point,
+                                                                                                     leaves[0],
+                                                                                                     segment_y_node)
+    (A if left_point.x >= intersected_trapezoid.leftp.x else B)[
+        left_point.identifier if left_point.x >= intersected_trapezoid.leftp.x else right_point.identifier].append(
+        subtree_root)
+    leaves[0].parents.append(subtree_root)
+
+    for leaf in leaves[1:]:
+        leaf.parents.append(segment_y_node)
+    [add_trapezoid(trapezoids, trap, leaf) for trap, leaf in zip(traps, leaves)]
+
+    intersected_trapezoid_leaf.reconnect_parents_to_new_subtree(subtree_root)
+
+
+def create_trapezoid(top, bottom, leftp, rightp):
+    trapezoid = Trapezoid(top, bottom, leftp, rightp)
+    return trapezoid
+
+def create_leaf_node(trapezoid):
+    leaf = LeafNode(trapezoid.trapezoid_id)
+    D[trapezoid.identifier].append(leaf)
+    return leaf
+
+def remove_trapezoid(trapezoids, T, trapezoid):
+    trapezoids.pop(trapezoid.trapezoid_id)
+    T.pop(trapezoid.identifier)
+
+def add_trapezoid(trapezoids, trapezoid, leaf):
+    trapezoids[trapezoid.trapezoid_id] = [trapezoid.identifier, leaf, trapezoid]
+
+def set_neighbors_case_segment_lies_inside(U_trapezoid, Y_trapezoid, Z_trapezoid, X_trapezoid):
+    # Set neighbors for U, Y, Z, X trapezoids
+    U_trapezoid.neighbors["top_right"] = Y_trapezoid
+    U_trapezoid.neighbors["bottom_right"] = Z_trapezoid
+
+    Y_trapezoid.neighbors["top_left"] = U_trapezoid
+    Y_trapezoid.neighbors["top_right"] = X_trapezoid
+
+    Z_trapezoid.neighbors["bottom_left"] = U_trapezoid
+    Z_trapezoid.neighbors["bottom_right"] = X_trapezoid
+
+    X_trapezoid.neighbors["top_left"] = Y_trapezoid
+    X_trapezoid.neighbors["bottom_left"] = Z_trapezoid
+
+def set_neighbors_case_one_point_inside(X_trapezoid, Y_trapezoid, Z_trapezoid):
+    # Set neighbors for X, Y, Z trapezoids
+    X_trapezoid.neighbors["top_right"] = Y_trapezoid
+    X_trapezoid.neighbors["bottom_right"] = Z_trapezoid
+
+    Y_trapezoid.neighbors["top_left"] = X_trapezoid
+
+    Z_trapezoid.neighbors["bottom_left"] = X_trapezoid
+
+#****************************************************************************************************
+
+def random_incremental_algorithm(segments, bounding_box, trapezoids):
+    global root_node
+    left_point = Point(bounding_box[0], bounding_box[1], is_left=True)
+    right_point = Point(bounding_box[2], bounding_box[3], is_left=False)
+
+    initial_trapezoid = Trapezoid(None, None, left_point, right_point)
+    root_node = LeafNode(initial_trapezoid.trapezoid_id)
+    trapezoids[initial_trapezoid.trapezoid_id] = [f"T{root_node.trapezoid_id}", root_node, initial_trapezoid]
+    D[initial_trapezoid.identifier].append(root_node)
+    display_dictionaries()
+    for segment_coords in segments:
+        segment = Segment(Point(segment_coords[0], segment_coords[1], is_left=True),
+                          Point(segment_coords[2], segment_coords[3], is_left=False))
+        print(segment)
+        intersected_trapezoids = find_intersected_trapezoids(segment, trapezoids)
+        print("Intersected trapezoids:", intersected_trapezoids)
+        update(intersected_trapezoids, trapezoids, segment.left, segment.right, segment)
+
+
+
+
+
+
+def create_adjacency_matrix_and_output(filename, trapezoids):
+    # Gather and sort all unique keys from dictionaries
+    combined_keys = sorted({*A, *B, *C, *D})
+    df = pd.DataFrame(0, index=combined_keys, columns=combined_keys)
+
+    def get_node_id(node):
+        if isinstance(node, XNode):
+            return node.point_represented.identifier
+        elif isinstance(node, YNode):
+            return node.segment.identifier
+        elif isinstance(node, LeafNode):
+            return trapezoids[node.trapezoid_id][0]
+        return node
+
+    def process_nodes(key, nodes, above_below=False):
+        for node in nodes:
+            left = get_node_id(node.left if not above_below else node.above)
+            right = get_node_id(node.right if not above_below else node.below)
+            df.loc[[left, right], key] += 1
+
+    # Populate the DataFrame for each dictionary
+    for key in combined_keys:
+        if key in A or key in B:
+            process_nodes(key, A.get(key, []))
+        if key in C:
+            process_nodes(key, C[key], above_below=True)
+
+    # Add total sums as the last row and column
+    df['Total'] = df.sum(axis=1)
+    df.loc['Total'] = df.sum()
+
+    # Write the DataFrame to a text file with aligned formatting
+    with open(filename, 'w') as f:
+        f.write(df.to_string(index=True, header=True, justify='center'))
+
+
+
+
+def traverse_x_node(current_node, query_point):
+    if query_point.x <= current_node.x_value:
+        return current_node.right, current_node.point_represented.identifier
+    return current_node.left, current_node.point_represented.identifier
+
+def traverse_y_node(current_node, query_point):
+
+    segment = current_node.segment
+    if query_point_lies_on_segment(query_point, segment):
+        return current_node.above, segment.identifier
+    elif is_point_above_segment(query_point, segment):
+        return current_node.above, segment.identifier
+    else:
+        return current_node.below, segment.identifier
+
+def query_points(root_node, query_point):
+    path, current_node = [], root_node
+
+    while not isinstance(current_node, LeafNode):
+        current_node, node_id = (traverse_x_node(current_node, query_point)
+                                 if isinstance(current_node, XNode)
+                                 else traverse_y_node(current_node, query_point))
+        path.append(node_id)
+
+    return path + [f"T{current_node.trapezoid_id}"]
+
+
+
+
+def initialize_trapezoidal_map(input_file):
+    segments, bounding_box = process(input_file)
+    print("Segments:", segments)
+    print("Bounding Box:", bounding_box)
+    return segments, bounding_box
+
+def build_trapezoidal_map(segments, bounding_box):
+    trapezoids = collections.defaultdict(list)
+    random_incremental_algorithm(segments, bounding_box, trapezoids)
+    return trapezoids
+
+def write_adjacency_matrix(output_file, trapezoids):
+    print("Output adjacency matrix...")
+    create_adjacency_matrix_and_output(output_file, trapezoids)
+
+def get_query_point():
+    input_values = input("Please enter the point coordinates (x y): ").split()
+    query_point = Point(float(input_values[0]), float(input_values[1]))
+    return query_point
 
 def main():
-    solution = Solution()
-    solution.get_input("InputFiles/ya2390.txt")
-    solution.build_trapezoidal_map()
+    segments, bounding_box = initialize_trapezoidal_map('InputFiles/ya2390.txt')
+    trapezoids = build_trapezoidal_map(segments, bounding_box)
+    display_dictionaries()
+    print("-" * 95)
+    write_adjacency_matrix('output.txt', trapezoids)
+    print("-" * 95)
 
-    # List of segments that have been inserted into the trapezoidal map
-    inserted_segments = ['S1']  # Update this list as you insert more segments
-
-    # Get plotting data with only inserted segments
-    plotting_data = get_plotting_data(solution, inserted_segments)
-
-    # Initialize visualizer with plotting data
-    visualizer = TrapezoidalMapVisualizer(
-        trapezoids=plotting_data['trapezoids'],
-        segments=plotting_data['segments'],
-        points=plotting_data['points'],
-        min_x=plotting_data['min_x'],
-        max_x=plotting_data['max_x'],
-        min_y=plotting_data['min_y'],
-        max_y=plotting_data['max_y']
-    )
-
-    # Plot the trapezoidal map
-    visualizer.plot()
+    query_point = get_query_point()
+    path = query_points(root_node, query_point)
+    print("Traversal path: " + ' '.join(path))
 
 
 if __name__ == '__main__':
